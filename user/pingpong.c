@@ -30,5 +30,5 @@ int main()
 	printf("%d : Received pong\n",getpid());
     }
 
-    exit(0);
+    exit();
 }
