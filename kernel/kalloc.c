@@ -8,37 +8,31 @@
 #include "spinlock.h"
 #include "riscv.h"
 #include "defs.h"
-#include "proc.h"
 
 void freerange(void *pa_start, void *pa_end);
 
 extern char end[]; // first address after kernel.
                    // defined by kernel.ld.
 
-struct spinlock common;
-
 struct run {
   struct run *next;
 };
 
-
-
 struct {
   struct spinlock lock;
   struct run *freelist;
-} kmem[8];
-
-
-
+  char name[6];
+} kmem[NCPU];
 
 void
 kinit()
 {
-  int cpu;
-  push_off();
-  cpu = cpuid();
-  pop_off();
-  initlock(&kmem[cpu].lock, "kmem");
+  for(int i = 0; i < NCPU; i++) {
+    strncpy(kmem[i].name, "kmem", 6);
+    kmem[i].name[4] = '0' + i;
+    initlock(&kmem[i].lock, kmem[i].name);
+  }
+  //initlock(&kmem.lock, "kmem");
   freerange(end, (void*)PHYSTOP);
 }
 
@@ -59,11 +53,6 @@ void
 kfree(void *pa)
 {
   struct run *r;
-  int cpu;
-  push_off();
-  cpu = cpuid();
-  pop_off();
-
 
   if(((uint64)pa % PGSIZE) != 0 || (char*)pa < end || (uint64)pa >= PHYSTOP)
     panic("kfree");
@@ -72,11 +61,14 @@ kfree(void *pa)
   memset(pa, 1, PGSIZE);
 
   r = (struct run*)pa;
-
-  acquire(&kmem[cpu].lock);
-  r->next = kmem[cpu].freelist;
-  kmem[cpu].freelist = r;
-  release(&kmem[cpu].lock);
+  
+  push_off();
+  int i = cpuid();
+  pop_off();
+  acquire(&kmem[i].lock);
+  r->next = kmem[i].freelist;
+  kmem[i].freelist = r;
+  release(&kmem[i].lock);
 }
 
 // Allocate one 4096-byte page of physical memory.
@@ -85,57 +77,30 @@ kfree(void *pa)
 void *
 kalloc(void)
 {
-  //struct proc *p = myproc();
   struct run *r;
-  int cpu;
-  push_off();
-  cpu = cpuid();
-  pop_off();
-
-  acquire(&kmem[cpu].lock);
-  if(!kmem[cpu].freelist){
-    for(int i=0;i<8;++i){
-      if(i!=cpu){
-        if(kmem[i].freelist){
-          for(int j=0;j<5;++j){
-            if(!kmem[cpu].freelist && kmem[i].freelist){
-               acquire(&kmem[i].lock);
-               kmem[cpu].freelist= kmem[i].freelist;
-               kmem[i].freelist = kmem[i].freelist->next;
-               kmem[cpu].freelist->next = 0;
-               release(&kmem[i].lock);
-            }
-            else if(kmem[i].freelist){
-              acquire(&kmem[i].lock);
-              r  = kmem[i].freelist;
-              kmem[i].freelist = r->next;
-              r->next = kmem[cpu].freelist;
-              kmem[cpu].freelist = r;
-              release(&kmem[i].lock);
-            }
-            else
-              break;
-          }
-
-        }
-      }
-    }
-
-  }
-
   
-  if(!kmem[cpu].freelist){
-    //printf("System ran out of memory\n");
-    release(&kmem[cpu].lock);
-    return 0;
-    //p->killed = 1;
-    //exit(1);
-  }
-  //release(&kmem[cpu].lock);
-  r = kmem[cpu].freelist;
+  push_off();
+  int i = cpuid();
+  pop_off();
+  acquire(&kmem[i].lock);
+  r = kmem[i].freelist;
+
   if(r)
-    kmem[cpu].freelist = r->next;
-  release(&kmem[cpu].lock);
+    kmem[i].freelist = r->next;
+  release(&kmem[i].lock);
+
+  if (!r) {
+    for (int i = 0; i < NCPU; i++) {
+      acquire(&kmem[i].lock);
+      r = kmem[i].freelist;
+      if(r) {
+        kmem[i].freelist = r->next;
+        release(&kmem[i].lock);
+        break;
+      }
+      release(&kmem[i].lock);
+    }
+  }
 
   if(r)
     memset((char*)r, 5, PGSIZE); // fill with junk
